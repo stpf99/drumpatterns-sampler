@@ -734,7 +734,7 @@ class DrumSamplerApp(Gtk.Window):
         intensity = self.intensity_spin.get_value()
         pattern_length = int(self.length_spinbutton.get_value())
         mod = self.mod_combo.get_active_text()
-        
+
         rhythm_styles = {
             "Techno": {'Stopa': ['single'], 'Werbel': ['swing'], 'Talerz': ['burst'], 'TomTom': ['accent']},
             "House": {'Stopa': ['double'], 'Werbel': ['single'], 'Talerz': ['swing'], 'TomTom': ['single']},
@@ -746,40 +746,52 @@ class DrumSamplerApp(Gtk.Window):
             "Breakbeat": {'Stopa': ['burst'], 'Werbel': ['swing'], 'Talerz': ['double'], 'TomTom': ['single']}
         }
         rules = rhythm_styles.get(genre, {'Stopa': ['single'], 'Werbel': ['single'], 'Talerz': ['single'], 'TomTom': ['single']})
-        
+
         if self.advanced_sequencer_mode:
             for inst in self.instruments:
                 self.patterns[inst] = [{'active': False, 'rhythm_type': 'single'} for _ in range(pattern_length)]
         else:
             for inst in self.instruments:
                 self.patterns[inst] = [0] * pattern_length
-        
+
         if progression == "Linear":
             for inst in self.instruments:
                 step_interval = pattern_length // occurrences
                 for i in range(0, pattern_length, step_interval):
                     if random.random() < intensity:
-                        self.patterns = {inst: [{ 'active': False } for _ in range(num_steps)] for inst in instruments}
-                        self.patterns[inst][i]['rhythm_type'] = random.choice(rules[inst])
+                        if self.advanced_sequencer_mode:
+                            self.patterns[inst][i]['active'] = True
+                            self.patterns[inst][i]['rhythm_type'] = random.choice(rules[inst])
+                        else:
+                            self.patterns[inst][i] = 1
         elif progression == "Dense":
             for inst in self.instruments:
                 for i in range(pattern_length):
                     if random.random() < intensity * 0.8:
-                        self.patterns = {inst: [{ 'active': False } for _ in range(num_steps)] for inst in instruments}
-                        self.patterns[inst][i]['rhythm_type'] = random.choice(rules[inst])
+                        if self.advanced_sequencer_mode:
+                            self.patterns[inst][i]['active'] = True
+                            self.patterns[inst][i]['rhythm_type'] = random.choice(rules[inst])
+                        else:
+                            self.patterns[inst][i] = 1
         elif progression == "Sparse":
             for inst in self.instruments:
                 for i in range(pattern_length):
                     if random.random() < intensity * 0.3:
-                        self.patterns = {inst: [{ 'active': False } for _ in range(num_steps)] for inst in instruments}
-                        self.patterns[inst][i]['rhythm_type'] = random.choice(rules[inst])
+                        if self.advanced_sequencer_mode:
+                            self.patterns[inst][i]['active'] = True
+                            self.patterns[inst][i]['rhythm_type'] = random.choice(rules[inst])
+                        else:
+                            self.patterns[inst][i] = 1
         elif progression == "Random":
             for inst in self.instruments:
                 for i in range(pattern_length):
                     if random.random() < intensity:
-                        self.patterns = {inst: [{ 'active': False } for _ in range(num_steps)] for inst in instruments}
-                        self.patterns[inst][i]['rhythm_type'] = random.choice(rules[inst])
-        
+                        if self.advanced_sequencer_mode:
+                            self.patterns[inst][i]['active'] = True
+                            self.patterns[inst][i]['rhythm_type'] = random.choice(rules[inst])
+                        else:
+                            self.patterns[inst][i] = 1
+
         if mod == "Simplify":
             for inst in self.instruments:
                 for i in range(pattern_length):
@@ -793,9 +805,12 @@ class DrumSamplerApp(Gtk.Window):
             for inst in self.instruments:
                 for i in range(pattern_length):
                     if random.random() < intensity * 0.2:
-                        self.patterns = {inst: [{ 'active': False } for _ in range(num_steps)] for inst in instruments}
-                        self.patterns[inst][i]['rhythm_type'] = random.choice(rules[inst])
-        
+                        if self.advanced_sequencer_mode:
+                            self.patterns[inst][i]['active'] = True
+                            self.patterns[inst][i]['rhythm_type'] = random.choice(rules[inst])
+                        else:
+                            self.patterns[inst][i] = 1
+
         self.update_buttons()
 
     def on_pattern_length_changed(self, spinbutton):
