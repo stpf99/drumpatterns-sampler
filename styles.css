@@ -1,0 +1,31 @@
+.circle-talerz,.circle-stopa,.circle-werbel,.circle-tomtom {
+    border-radius: 15px;
+    background-color: white;
+}
+.circle-talerz:active {
+    background-color: #FF5555;
+}
+.circle-stopa:active {
+    background-color: #55FF55;
+}
+.circle-werbel:active {
+    background-color: #5555FF;
+}
+.circle-tomtom:active {
+    background-color: #FFAA00;
+}
+.occurrence {
+    background-color: #FFFF00;
+}
+.instrument-talerz {
+    color: #FF5555;
+}
+.instrument-stopa {
+    color: #55FF55;
+}
+.instrument-werbel {
+    color: #5555FF;
+}
+.instrument-tomtom {
+    color: #FFAA00;
+}
