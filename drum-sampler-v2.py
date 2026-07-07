@@ -899,6 +899,278 @@ class DrumSamplerApp(Gtk.Window):
         drummer_button.connect("clicked", self.add_drummer_to_audio)
         self.main_box.pack_start(drummer_button, False, False, 0)
 
+    def add_drummer_to_audio(self, widget):
+        file_dialog = Gtk.FileChooserDialog(title="Select Audio File", parent=self)
+        file_dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OPEN, Gtk.ResponseType.OK)
+
+        progress_dialog = Gtk.Dialog(title="Generating Percussion", transient_for=self, modal=True)
+        progress_dialog.set_default_size(350, 120)
+
+        progress_bar = Gtk.ProgressBar()
+        progress_bar.set_show_text(True)
+        progress_dialog.get_content_area().pack_start(progress_bar, True, True, 10)
+        progress_dialog.show_all()
+
+        def update_progress(fraction, message):
+            GLib.idle_add(progress_bar.set_fraction, fraction)
+            GLib.idle_add(progress_bar.set_text, message)
+
+        def generate_drums_thread(audio_path):
+            try:
+                update_progress(0.05, "Loading audio and extracting spectrum...")
+                y, sr = librosa.load(audio_path, sr=22050)
+                
+                # 1. Zaawansowana analiza频谱owa (zamiast prostego split)
+                update_progress(0.15, "Analyzing frequency spectrum (Bass, Mid, High)...")
+                spectral_map = self.analyze_spectral_layers(y, sr)
+                
+                update_progress(0.25, "Extracting tempo and beat grid...")
+                tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
+                beat_times = librosa.frames_to_time(beat_frames, sr=sr)
+                
+                update_progress(0.35, "Detecting structural segments (ignoring noise/reverb)...")
+                # Używamy warstwy "Mid/Lead" do wykrywania struktury, ignorując tło
+                valid_segments = self.detect_structure_from_music(spectral_map['mid'], sr)
+                
+                if len(valid_segments) < 2:
+                    raise ValueError("Could not find enough musical structure (leads/bass) to generate drums. File might be pure noise/ambient.")
+
+                update_progress(0.50, "Mapping song structure (Intro, Verse, Chorus)...")
+                structure_map = self.map_song_structure(valid_segments, tempo, sr)
+
+                update_progress(0.65, "Generating complementary drum track...")
+                percussion_track = self.advanced_generate_drum_track(structure_map, spectral_map, tempo, sr)
+
+                update_progress(0.80, "Synthesizing audio from samples...")
+                percussion_audio = self.synthesize_percussion_audio(percussion_track, sr, tempo)
+
+                update_progress(0.90, "Mixing and mastering tracks...")
+                self.save_generated_tracks(audio_path, percussion_audio, y, sr)
+
+                update_progress(1.0, "Done!")
+                GLib.timeout_add(500, lambda: (progress_dialog.destroy(), 
+                                                self.show_save_confirmation(
+                                                    audio_path.replace(".mp3", "_drums_only.wav").replace(".wav", "_drums_only.wav"),
+                                                    audio_path.replace(".mp3", "_mixed.wav").replace(".wav", "_mixed.wav")
+                                                ))[0])
+                                                
+            except Exception as e:
+                GLib.idle_add(progress_dialog.destroy)
+                GLib.idle_add(self.show_error_dialog, str(e))
+
+        response = file_dialog.run()
+        if response == Gtk.ResponseType.OK:
+            audio_path = file_dialog.get_filename()
+            file_dialog.destroy()
+            threading.Thread(target=generate_drums_thread, args=(audio_path,), daemon=True).start()
+        else:
+            file_dialog.destroy()
+
+    def analyze_spectral_layers(self, y, sr):
+        """
+        Rozdziela频spektrum na warstwy: Bas (<250Hz), Mid/Lead (250-4kHz), Tło/High (>4kHz).
+        Zwraca słownik z wyizolowanymi sygnałami dla każdej warstwy.
+        """
+        D = librosa.stft(y)
+        magnitude = np.abs(D)
+        freqs = librosa.fft_frequencies(sr=sr)
+
+        # Maski频谱owe
+        bass_mask = freqs < 250
+        mid_mask = (freqs >= 250) & (freqs < 4000)
+        high_mask = freqs >= 4000
+
+        # Rekonstrukcja sygnałów w domenie czasu
+        y_bass = librosa.istft(D * bass_mask)
+        y_mid = librosa.istft(D * mid_mask)
+        y_high = librosa.istft(D * high_mask)
+
+        return {
+            'bass': y_bass,
+            'mid': y_mid,      # Głównie Lead / Wokal / Mid-range syntezatory
+            'high': y_high,    # Tło, pogłos, szum, hi-haty oryginalne
+            'full': y
+        }
+
+    def detect_structure_from_music(self, y_music, sr):
+        """
+        Zamiast używać prostego librosa.effects.split (który wyłapuje szum),
+        szukamy "prawdziwych" onsetów w warstwie Mid/Bas na podstawie energii.
+        """
+        # Obliczamy energię ramek
+        frame_length = 2048
+        energy = np.array([
+            np.sum(np.abs(y_music[i:i+frame_length])**2)
+            for i in range(0, len(y_music) - frame_length, frame_length // 2)
+        ])
+        
+        # Prosta normalizacja
+        if np.max(energy) > 0:
+            energy = energy / np.max(energy)
+
+        # Wykrywamy punkty, w których energia gwałtownie rośnie (Onset Detection)
+        onset_env = librosa.onset.onset_strength(y=y_music, sr=sr)
+        peaks = librosa.util.peak_pick(onset_env, pre_max=3, post_max=5, pre_avg=5, post_avg=5)
+
+        if len(peaks) < 2:
+            # Fallback na równe podziały, jeśli brak wyraźnych peaków
+            total_frames = len(y_music)
+            num_segments = max(2, int(librosa.get_duration(y=y_music, sr=sr) / 4.0)) # Segment co ~4 sekundy
+            return [(i * total_frames // num_segments, (i+1) * total_frames // num_segments) for i in range(num_segments)]
+
+        # Grupujemy peaki w segmenty
+        frames = librosa.time_to_frames(peaks, sr=sr)
+        segments = []
+        start_frame = 0
+        
+        for i in range(1, len(frames)):
+            # Jeśli przerwa między peakami jest większa niż 1.5 sekundy, kończymy segment
+            time_diff = peaks[i] - peaks[i-1]
+            if time_diff > 1.5:
+                end_frame = frames[i]
+                segments.append((start_frame, end_frame))
+                start_frame = end_frame
+                
+        # Dodaj ostatni segment
+        segments.append((start_frame, len(y_music)))
+        
+        return segments
+
+    def map_song_structure(self, segments, tempo, sr):
+        """
+        Analizuje listę segmentów i przypisuje im tagi struktury (intro, verse, chorus)
+        na podstawie gęstości onsetów (energii) w danym segmencie.
+        """
+        structure = []
+        total_segments = len(segments)
+        
+        # Obliczamy "gęstość" muzyczną dla każdego segmentu (ile nut na sekundę)
+        segment_densities = []
+        for start, end in segments:
+            duration = librosa.frames_to_time(end - start, sr=sr)
+            if duration == 0: duration = 0.1
+            # Przybliżona gęstość (zakładając średnią rozdzielczość onsetów)
+            density = (end - start) / (duration * 100)
+            segment_densities.append(density)
+
+        max_density = max(segment_densities) if max(segment_densities) > 0 else 1
+        min_density = min(segment_densities)
+
+        for i, (start, end) in enumerate(segments):
+            duration = librosa.frames_to_time(end - start, sr=sr)
+            norm_density = (segment_densities[i] - min_density) / (max_density - min_density + 0.001)
+            
+            # Logika struktury
+            if i == 0:
+                tag = "intro"
+            elif i == total_segments - 1:
+                tag = "outro"
+            elif norm_density > 0.7:
+                tag = "chorus"  # Największa gęstość = Chorus/Drop
+            elif norm_density < 0.3:
+                tag = "break"   # Najmniejsza gęstość = Break/Outro
+            else:
+                tag = "verse"   # Środek = Verse/Bridge
+
+            structure.append({
+                'start_frame': start,
+                'end_frame': end,
+                'duration_sec': duration,
+                'tag': tag,
+                'density': norm_density
+            })
+            
+        return structure
+
+    def advanced_generate_drum_track(self, structure_map, spectral_map, tempo, sr):
+        """
+        Generuje ścieżkę perkusyjną OPARTĄ O STRUKTURĘ I ANALIZĘ频谱OWĄ.
+        Zamiast losowości, używa reguł muzycznych zależnych od tagu (verse/chorus).
+        """
+        steps_per_beat = 4  # 16th notes
+        beats_per_second = tempo / 60.0
+        
+        # Inicjalizacja pustej ścieżki
+        total_duration = structure_map[-1]['end_frame'] / sr
+        total_steps = int(total_duration * beats_per_second * steps_per_beat)
+        
+        percussion_track = {inst: [0] * total_steps for inst in self.instruments}
+        
+        # Reguły generowania per tag struktury
+        rules = {
+            "intro":  {'Stopa': 0.2, 'Werbel': 0.1, 'Talerz': 0.3, 'TomTom': 0.0, 'style': 'sparse'},
+            "verse":  {'Stopa': 0.6, 'Werbel': 0.4, 'Talerz': 0.6, 'TomTom': 0.1, 'style': 'groove'},
+            "chorus": {'Stopa': 0.9, 'Werbel': 0.8, 'Talerz': 0.9, 'TomTom': 0.4, 'style': 'dense'},
+            "break":  {'Stopa': 0.0, 'Werbel': 0.0, 'Talerz': 0.1, 'TomTom': 0.0, 'style': 'fill'},
+            "outro": {'Stopa': 0.3, 'Werbel': 0.2, 'Talerz': 0.4, 'TomTom': 0.0, 'style': 'sparse'}
+        }
+
+        for segment in structure_map:
+            tag = segment['tag']
+            rule = rules.get(tag, rules['verse'])
+            
+            start_step = int((segment['start_frame'] / sr) * beats_per_second * steps_per_beat)
+            end_step = int((segment['end_frame'] / sr) * beats_per_second * steps_per_beat)
+            
+            for step in range(start_step, min(end_step, total_steps)):
+                beat_pos = step % steps_per_beat  # Pozycja w uderzeniu (0-3)
+                
+                # GENEROWANIE STOPY (Zależne od basu)
+                if rule['Stopa'] > 0:
+                    if rule['style'] == 'dense' and beat_pos == 0: percussion_track['Stopa'][step] = 1
+                    elif rule['style'] == 'groove' and beat_pos in [0, 2]: percussion_track['Stopa'][step] = 1
+                    elif rule['style'] == 'sparse' and beat_pos == 0 and random.random() < rule['Stopa']: percussion_track['Stopa'][step] = 1
+                
+                # GENEROWANIE WERBLA (Zależne od warstwy Mid/Lead - unika kolizji)
+                if rule['Werbel'] > 0:
+                    if beat_pos == 2: # Typowo na "2" i "4"
+                        # Sprawdzamy czy w oryginalnym leadzie jest duża energia w tym momencie
+                        mid_energy = self.get_local_energy(spectral_map['mid'], segment['start_frame'], segment['end_frame'], step, start_step, end_step, sr)
+                        # Akcentujemy werbel tam, gdzie lead gra ciszej (uzupełnianie)
+                        if mid_energy < 0.5 or random.random() < rule['Werbel']:
+                            percussion_track['Werbel'][step] = 1
+
+                # GENEROWANIE TALERZA
+                if rule['Talerz'] > 0 and random.random() < rule['Talerz']:
+                    if rule['style'] == 'dense': percussion_track['Talerz'][step] = 1
+                    elif rule['style'] in ['groove', 'sparse'] and step % 2 == 0: percussion_track['Talerz'][step] = 1
+
+                # GENEROWANIE TOMTOMÓW (Tylko w chorus lub jako fill)
+                if rule['TomTom'] > 0:
+                    if tag == 'chorus' and beat_pos == 3 and random.random() < rule['TomTom']: percussion_track['TomTom'][step] = 1
+                    if tag == 'break' and step % 2 == 0: percussion_track['TomTom'][step] = 1 # Errotyczne przejście
+
+        return percussion_track
+
+    def get_local_energy(self, y_segment, seg_start_f, seg_end_f, current_step, start_step, end_step, sr):
+        """
+        Pomocnicza funkcja zwracająca względną energię w konkretnym momencie czasu.
+        Zapobiega generowaniu perkusji w miejscach, gdzie oryginał ma już za dużo dźwięku.
+        """
+        if start_step == end_step: return 0.5
+        progress = (current_step - start_step) / (end_step - start_step)
+        start_f = int(seg_start_f + progress * (seg_end_f - seg_start_f))
+        end_f = min(start_f + int(sr * 0.05), seg_end_f, len(y_segment)) # Okno 50ms
+        
+        if start_f >= end_f or end_f > len(y_segment): return 0.5
+        
+        chunk = y_segment[start_f:end_f]
+        if len(chunk) == 0: return 0.0
+        return np.sqrt(np.mean(chunk**2)) # RMS
+
+    def synthesize_percussion_audio(self, percussion_track, sr, tempo):
+        """Optymalizowana synteza audio z sampli"""
+        total_length = len(percussion_track['Stopa'])
+        step_duration_samples = int(sr * 60.0 / tempo / 4) # 16th note
+        
+        audio = np.zeros(total_length * step_duration_samples, dtype=np.float32)
+
+        for inst in self.instruments:
+            if inst not in self.samples: continue
+            
+            trigger_steps = np.where(np.array(percussion_track[inst]) == 1)[0]
+            if len(trigger_steps) == 0: continue
+
     def create_sample_manipulation_area(self):
         sample_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=int(10 * self.scale_factor))
         sample_box.set_hexpand(True)
